@@ -1,0 +1,253 @@
+#!/bin/bash
+set -euo pipefail
+
+DB_HOST="127.0.0.1"
+DB_NAME="giteadb"
+DB_USER="gitea"
+GITEA_HOME="/var/lib/gitea"
+
+REPO_ID="${GITEA_REPO_ID:-}"
+PUSHER_ID="${GITEA_PUSHER_ID:-}"
+PUSHER_NAME="${GITEA_PUSHER_NAME:-}"
+
+if [[ -z "$REPO_ID" || -z "$PUSHER_ID" ]]; then
+    echo "Quota hook error: Gitea repository/user information is missing." >&2
+    exit 1
+fi
+
+TMPDIR="$(mktemp -d /tmp/gitea-quota-pre.XXXXXX)"
+RECEIVE_FILE="$TMPDIR/receive"
+OBJECT_FILE="$TMPDIR/objects"
+
+cleanup() {
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+cat > "$RECEIVE_FILE"
+
+if [[ ! -s "$RECEIVE_FILE" ]]; then
+    exit 0
+fi
+
+# Create a deterministic push identifier.
+PUSH_KEY="$(
+    {
+        printf '%s\n' "$REPO_ID"
+        printf '%s\n' "$PUSHER_ID"
+        cat "$RECEIVE_FILE"
+    } | sha256sum | awk '{print $1}'
+)"
+
+# Find the new objects introduced by this push.
+#
+# Only non-zero new tips are considered.
+# Objects already reachable from existing refs are excluded.
+NEW_TIPS="$TMPDIR/new-tips"
+
+awk '$2 !~ /^0+$/ {print $2}' "$RECEIVE_FILE" > "$NEW_TIPS"
+
+if [[ ! -s "$NEW_TIPS" ]]; then
+    exit 0
+fi
+
+git rev-list --objects --stdin --not --all < "$NEW_TIPS" \
+    | awk '{print $1}' \
+    | sort -u > "$TMPDIR/object-oids"
+
+if [[ ! -s "$TMPDIR/object-oids" ]]; then
+    exit 0
+fi
+
+# Calculate logical Git object size.
+#
+# Format:
+# object_oid<TAB>logical_size
+#
+# %(objectsize) is used intentionally instead of %(objectsize:disk).
+while read -r oid; do
+    git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' \
+        <<< "$oid"
+done < "$TMPDIR/object-oids" \
+    | awk '$2 != "missing" {print $1 "\t" $3}' > "$OBJECT_FILE"
+
+if [[ ! -s "$OBJECT_FILE" ]]; then
+    exit 0
+fi
+
+OBJECT_COUNT="$(wc -l < "$OBJECT_FILE")"
+
+echo "Quota check: $OBJECT_COUNT new Git object(s) detected for $PUSHER_NAME." >&2
+
+export HOME="$GITEA_HOME"
+
+set +e
+
+RESULT="$(
+{
+    cat <<SQL
+BEGIN;
+
+-- Serialize quota operations for this repository.
+SELECT pg_advisory_xact_lock(2147483000, ${REPO_ID}::integer);
+
+-- Lock the user's quota row so concurrent pushes cannot
+-- both consume the same remaining quota.
+SELECT user_id
+FROM quota_user
+WHERE user_id = ${PUSHER_ID}
+  AND enabled = TRUE
+FOR UPDATE;
+
+CREATE TEMP TABLE incoming_objects (
+    object_oid TEXT PRIMARY KEY,
+    size_bytes BIGINT NOT NULL
+) ON COMMIT DROP;
+
+COPY incoming_objects(object_oid, size_bytes) FROM STDIN;
+SQL
+
+    cat "$OBJECT_FILE"
+
+    printf '\\.\n'
+
+    cat <<SQL
+
+-- If this push already has an unresolved reservation,
+-- fail closed instead of double-reserving it.
+DO \$\$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM quota_reservation r
+        JOIN incoming_objects i
+          ON i.object_oid = r.object_oid
+        WHERE r.repository_id = ${REPO_ID}
+          AND r.status = 'reserved'
+    ) THEN
+        RAISE EXCEPTION
+            'QUOTA_PENDING_RECONCILIATION: unresolved reservation exists for one or more Git objects';
+    END IF;
+END
+\$\$;
+
+-- Calculate only objects not previously accounted for
+-- in this repository.
+CREATE TEMP TABLE quota_incoming AS
+SELECT
+    i.object_oid,
+    i.size_bytes
+FROM incoming_objects i
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM quota_git_object q
+    WHERE q.repository_id = ${REPO_ID}
+      AND q.object_oid = i.object_oid
+);
+
+DO \$\$
+DECLARE
+    v_quota BIGINT;
+    v_used BIGINT;
+    v_reserved BIGINT;
+    v_incoming BIGINT;
+BEGIN
+
+    SELECT
+        quota_bytes,
+        COALESCE(
+            (
+                SELECT SUM(q.size_bytes)
+                FROM quota_git_object q
+                WHERE q.user_id = ${PUSHER_ID}
+            ),
+            0
+        ),
+        reserved_bytes
+    INTO v_quota, v_used, v_reserved
+    FROM quota_user
+    WHERE user_id = ${PUSHER_ID}
+      AND enabled = TRUE
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'QUOTA_USER_NOT_CONFIGURED: user_id=${PUSHER_ID} is not configured for quota enforcement';
+    END IF;
+
+    SELECT COALESCE(SUM(size_bytes), 0)
+    INTO v_incoming
+    FROM quota_incoming;
+
+    RAISE NOTICE
+        'Quota: user=${PUSHER_NAME}, quota=%, used=%, reserved=%, incoming=%',
+        v_quota,
+        v_used,
+        v_reserved,
+        v_incoming;
+
+    IF v_used + v_reserved + v_incoming > v_quota THEN
+
+        RAISE EXCEPTION
+            'QUOTA_EXCEEDED: user=% quota=% bytes used=% reserved=% incoming=% remaining=%',
+            '${PUSHER_NAME}',
+            v_quota,
+            v_used,
+            v_reserved,
+            v_incoming,
+            GREATEST(v_quota - v_used - v_reserved, 0);
+
+    END IF;
+
+    -- Create one reservation row per new object.
+    INSERT INTO quota_reservation (
+        user_id,
+        repository_id,
+        push_key,
+        object_oid,
+        size_bytes,
+        status
+    )
+    SELECT
+        ${PUSHER_ID},
+        ${REPO_ID},
+        '${PUSH_KEY}',
+        object_oid,
+        size_bytes,
+        'reserved'
+    FROM quota_incoming;
+
+    -- Increase reserved bytes for this user.
+    UPDATE quota_user
+    SET
+        reserved_bytes = reserved_bytes + v_incoming,
+        updated_at = NOW()
+    WHERE user_id = ${PUSHER_ID};
+
+END
+\$\$;
+
+COMMIT;
+SQL
+} | psql \
+    -h "$DB_HOST" \
+    -U "$DB_USER" \
+    -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1
+) 2>&1"
+
+RC=$?
+
+set -e
+
+if [[ $RC -ne 0 ]]; then
+    echo "$RESULT" >&2
+    echo >&2
+    echo "Push rejected by Gitea resource quota enforcement." >&2
+    exit 1
+fi
+
+echo "$RESULT" >&2
+echo "Quota reservation created successfully." >&2
+
+exit 0

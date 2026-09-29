@@ -1,0 +1,141 @@
+#!/bin/bash
+set -euo pipefail
+
+DB_HOST="127.0.0.1"
+DB_NAME="giteadb"
+DB_USER="gitea"
+GITEA_HOME="/var/lib/gitea"
+
+REPO_ID="${GITEA_REPO_ID:-}"
+PUSHER_ID="${GITEA_PUSHER_ID:-}"
+PUSHER_NAME="${GITEA_PUSHER_NAME:-}"
+
+if [[ -z "$REPO_ID" || -z "$PUSHER_ID" ]]; then
+    echo "Quota post-receive error: Gitea repository/user information is missing." >&2
+    exit 0
+fi
+
+TMPDIR="$(mktemp -d /tmp/gitea-quota-post.XXXXXX)"
+RECEIVE_FILE="$TMPDIR/receive"
+
+cleanup() {
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+cat > "$RECEIVE_FILE"
+
+if [[ ! -s "$RECEIVE_FILE" ]]; then
+    exit 0
+fi
+
+# Must use exactly the same push-key calculation as pre-receive.
+PUSH_KEY="$(
+    {
+        printf '%s\n' "$REPO_ID"
+        printf '%s\n' "$PUSHER_ID"
+        cat "$RECEIVE_FILE"
+    } | sha256sum | awk '{print $1}'
+)"
+
+export HOME="$GITEA_HOME"
+
+set +e
+
+RESULT="$(
+psql \
+    -h "$DB_HOST" \
+    -U "$DB_USER" \
+    -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 \
+    -v repo_id="$REPO_ID" \
+    -v pusher_id="$PUSHER_ID" \
+    -v push_key="$PUSH_KEY" <<'SQL'
+BEGIN;
+
+-- Serialize finalization for this repository.
+SELECT pg_advisory_xact_lock(
+    2147483000,
+    :'repo_id'::integer
+);
+
+-- Lock the user's quota row.
+SELECT user_id
+FROM quota_user
+WHERE user_id = :'pusher_id'::bigint
+FOR UPDATE;
+
+-- Keep the total reserved amount before changing reservation state.
+CREATE TEMP TABLE reservation_summary AS
+SELECT
+    COALESCE(SUM(size_bytes), 0)::bigint AS reserved_bytes
+FROM quota_reservation
+WHERE user_id = :'pusher_id'::bigint
+  AND repository_id = :'repo_id'::bigint
+  AND push_key = :'push_key'
+  AND status = 'reserved';
+
+-- Commit each reserved Git object into the permanent quota ledger.
+INSERT INTO quota_git_object (
+    repository_id,
+    object_oid,
+    user_id,
+    size_bytes
+)
+SELECT
+    r.repository_id,
+    r.object_oid,
+    r.user_id,
+    r.size_bytes
+FROM quota_reservation r
+WHERE r.user_id = :'pusher_id'::bigint
+  AND r.repository_id = :'repo_id'::bigint
+  AND r.push_key = :'push_key'
+  AND r.status = 'reserved'
+ON CONFLICT (repository_id, object_oid) DO NOTHING;
+
+-- Release the user's reserved capacity.
+UPDATE quota_user
+SET
+    reserved_bytes = GREATEST(
+        reserved_bytes -
+        (
+            SELECT reserved_bytes
+            FROM reservation_summary
+        ),
+        0
+    ),
+    updated_at = NOW()
+WHERE user_id = :'pusher_id'::bigint;
+
+-- Mark reservation records as committed.
+UPDATE quota_reservation
+SET
+    status = 'committed',
+    updated_at = NOW()
+WHERE user_id = :'pusher_id'::bigint
+  AND repository_id = :'repo_id'::bigint
+  AND push_key = :'push_key'
+  AND status = 'reserved';
+
+COMMIT;
+SQL
+) 2>&1"
+
+RC=$?
+
+set -e
+
+if [[ $RC -ne 0 ]]; then
+    echo "$RESULT" >&2
+    echo "WARNING: Git push succeeded, but quota accounting finalization failed." >&2
+    echo "Administrator reconciliation is required." >&2
+
+    # post-receive cannot reject an already completed Git push.
+    exit 0
+fi
+
+echo "$RESULT" >&2
+echo "Quota accounting finalized for user ${PUSHER_NAME}." >&2
+
+exit 0
