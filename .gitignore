@@ -1,0 +1,17 @@
+.env
+.env.*
+.pgpass
+**/.pgpass
+
+*.log
+*.bak
+*.backup
+*.dump
+
+app.ini
+**/app.ini
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
