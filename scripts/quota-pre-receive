@@ -40,9 +40,6 @@ PUSH_KEY="$(
 )"
 
 # Find the new objects introduced by this push.
-#
-# Only non-zero new tips are considered.
-# Objects already reachable from existing refs are excluded.
 NEW_TIPS="$TMPDIR/new-tips"
 
 awk '$2 !~ /^0+$/ {print $2}' "$RECEIVE_FILE" > "$NEW_TIPS"
@@ -60,11 +57,6 @@ if [[ ! -s "$TMPDIR/object-oids" ]]; then
 fi
 
 # Calculate logical Git object size.
-#
-# Format:
-# object_oid<TAB>logical_size
-#
-# %(objectsize) is used intentionally instead of %(objectsize:disk).
 while read -r oid; do
     git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' \
         <<< "$oid"
@@ -89,10 +81,53 @@ RESULT="$(
 BEGIN;
 
 -- Serialize quota operations for this repository.
-SELECT pg_advisory_xact_lock(2147483000, ${REPO_ID}::integer);
+SELECT pg_advisory_xact_lock(
+    2147483000,
+    ${REPO_ID}::integer
+);
 
--- Lock the user's quota row so concurrent pushes cannot
--- both consume the same remaining quota.
+-- Automatically create/update the quota record for this Gitea user.
+--
+-- Gitea user identity:
+--     "user".id
+--
+-- Gitea team membership:
+--     team_user.uid
+--     team_user.team_id
+--
+-- Quota policy:
+--     quota_team.team_id
+--     quota_team.quota_per_member_bytes
+--
+-- No manual user-to-quota mapping is required.
+INSERT INTO quota_user
+(
+    user_id,
+    username,
+    team_name,
+    quota_bytes
+)
+SELECT
+    u.id,
+    u.lower_name,
+    t.name,
+    qt.quota_per_member_bytes
+FROM "user" u
+JOIN team_user tu
+    ON tu.uid = u.id
+JOIN team t
+    ON t.id = tu.team_id
+JOIN quota_team qt
+    ON qt.team_id = t.id
+WHERE u.id = ${PUSHER_ID}
+  AND qt.enabled = TRUE
+ON CONFLICT (user_id)
+DO UPDATE SET
+    username = EXCLUDED.username,
+    team_name = EXCLUDED.team_name,
+    updated_at = NOW();
+
+-- Lock the user's quota row.
 SELECT user_id
 FROM quota_user
 WHERE user_id = ${PUSHER_ID}
@@ -172,7 +207,7 @@ BEGIN
 
     IF NOT FOUND THEN
         RAISE EXCEPTION
-            'QUOTA_USER_NOT_CONFIGURED: user_id=${PUSHER_ID} is not configured for quota enforcement';
+            'QUOTA_USER_NOT_CONFIGURED: user_id=${PUSHER_ID} is not a member of a quota-controlled team';
     END IF;
 
     SELECT COALESCE(SUM(size_bytes), 0)
@@ -229,6 +264,7 @@ END
 
 COMMIT;
 SQL
+
 } | psql \
     -h "$DB_HOST" \
     -U "$DB_USER" \
