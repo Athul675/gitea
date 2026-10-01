@@ -1,123 +1,99 @@
-# Gitea Server & Storage Quota POC
+# 🚀 Gitea Server & Storage Quota POC
 
-A complete Gitea deployment and custom per-user cumulative Git storage quota POC using Ubuntu, PostgreSQL, Gitea, Nginx, Fail2ban, Git hooks, and PostgreSQL-based quota accounting.
+[![Gitea](https://img.shields.io/badge/Gitea-1.22.3-34495E?style=for-the-badge&logo=gitea&logoColor=white)](https://gitea.io/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Nginx](https://img.shields.io/badge/Nginx-Reverse_Proxy-009639?style=for-the-badge&logo=nginx&logoColor=white)](https://nginx.org/)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04_/_24.04-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
----
-
-## Overview
-
-This repository contains the full production setup and configuration artifacts for deploying a self-hosted Gitea instance with enterprise-grade custom storage quotas.
-
-### Key Capabilities
-- **Gitea Core Setup**: systemd service integration, custom configuration (`app.ini`), and PostgreSQL database backend.
-- **Reverse Proxy & Security**: Nginx configuration for proxying Gitea, alongside Fail2ban rules to protect SSH/HTTP login attempts.
-- **Cumulative Git Storage Quota**: Custom `pre-receive` and `post-receive` hooks preventing users from exceeding allocated storage across all repositories.
-- **Automated Deployment**: Executable shell scripts for central hook deployment and symlinking across Gitea repositories.
+> **An enterprise-grade reference architecture for self-hosted Gitea deployments, featuring dynamic, PostgreSQL-backed cumulative Git storage quota enforcement at the server-hook layer.**
 
 ---
 
-## Architecture
+## 📌 Executive Overview
+
+Standard Git hosting solutions often lack granular, per-user cumulative storage tracking across multiple repositories.
+
+This Proof of Concept (POC) delivers an end-to-end infrastructure setup combining:
+
+- **Gitea**
+- **PostgreSQL**
+- **Nginx**
+- **Fail2ban**
+- **Git server-side hooks**
+- **PostgreSQL-backed quota tracking**
+
+The solution uses dynamic `pre-receive` and `post-receive` Git hooks to enforce cumulative storage quotas across multiple repositories.
+
+### Key Features
+
+- ⚡ **Centralized Hook Architecture**  
+  Executes server-side quota checks through lightweight repository-level symlinks using `z-quota`.
+
+- 📊 **Cumulative Storage Tracking**  
+  Evaluates aggregate Git object storage consumption across all repositories for each user.
+
+- 🔒 **Atomic Reservations**  
+  Prevents race conditions during simultaneous pushes by using transient quota reservation records.
+
+- 🛡️ **Hardened Proxy & Security**  
+  Integrates Nginx as a reverse proxy and Fail2ban for threat mitigation.
+
+- 🤖 **Automated Deployment**  
+  Provides an installation script for provisioning quota hooks across target bare Git repositories.
+
+---
+
+# 📐 Architecture & System Flow
 
 ```text
-                    Git Client
-                        |
-                        v
-                      Nginx (Port 80)
-                        |
-                        v
-                 Gitea Web / Git (Port 3001)
-                        |
-          +-------------+-------------+
-          |                           |
-          v                           v
-     PostgreSQL                 Git Repositories
-          |
-          v
-     Quota Tables
-          |
-          v
-   Pre/Post Receive Hooks (/usr/local/lib/gitea)
+                               +-----------------------+
+                               |      Git Client       |
+                               +-----------+-----------+
+                                           |
+                                           | HTTP / SSH
+                                           v
+                               +-----------+-----------+
+                               |   Nginx Reverse Proxy |
+                               +-----------+-----------+
+                                           |
+                                           | Port 3001
+                                           v
+                               +-----------+-----------+
+                               |     Gitea Service     |
+                               +-----------+-----------+
+                                           |
+                     +---------------------+---------------------+
+                     |                                           |
+                     v                                           v
+          +----------+-----------+                    +----------+-----------+
+          |  PostgreSQL Engine   |                    | Target Repositories |
+          +----------+-----------+                    +----------+-----------+
+                     |                                           |
+                     v                                           v
+          +----------+-----------+                    +----------+-----------+
+          |     Quota Tables     | <=== Hooks ====>  | /hooks/pre-receive.d |
+          +----------------------+                    | /hooks/post-receive.d|
+                     ^                                +----------------------+
+                     |
+                     |
+          /usr/local/lib/gitea/
+              quota-pre-receive
+              quota-post-receive
 
 
 
 
-Environment & System DetailsComponentValueOSUbuntu 22.04 LTS / 24.04 LTSGitea Version1.22.3Git Version2.34.1+DatabasePostgreSQL 14+Reverse ProxyNginxSecurityFail2banTargeted Repositoriesgitea-demo/web-app.gitgitea-demo/backend.gitgitea-demo/payment-service.gitQuota PolicyQuota policy is defined by team assignment, but usage and limits are tracked individually per user across all repositories they push to.TeamUsersQuota per UserDevelopersuser1, user2, user35 GiBTestersuser4, user5, user61 GiBDevOpsuser7, user8, user91 GiBCumulative Storage ExampleIf user4 pushes code across multiple repositories:Plaintextuser4
-├── web-app.git       (300 MB)
-├── backend.git       (400 MB)
-└── payment-service.git (200 MB)
-       │
-       └── Total Cumulative Usage: 900 MB / 1 GiB Quota Limit
+# ⚙️ Environment Specifications
 
-
-
-
-Repository StructurePlaintext.
-├── README.md
-├── configs/
-│   ├── app.ini.example          # Sample Gitea configuration file
-│   ├── gitea.service            # Systemd service unit definition
-│   ├── nginx.conf               # Nginx reverse proxy configuration
-│   └── fail2ban/
-│       ├── gitea-filter.conf    # Fail2ban filter rules for Gitea log parser
-│       └── gitea-jail.local     # Fail2ban jail configuration
-├── scripts/
-│   ├── install-hooks.sh         # Dynamic installer script for repository symlinks
-│   ├── quota-pre-receive        # Central pre-receive validation script
-│   └── quota-post-receive       # Central post-receive accounting script
-└── sql/
-    ├── 01_schema.sql            # Table definitions (quota_user, quota_git_object, quota_reservation)
-    └── 02_seed_quotas.sql       # Seed data for user quotas and permissions
-
-
-
-
-Deployment & Setup Guide1. Database SetupApply the quota database tables and seed values to your PostgreSQL database:Bashpsql -U gitea -d giteadb -f sql/01_schema.sql
-psql -U gitea -d giteadb -f sql/02_seed_quotas.sql
-
-
-
-2. System Service & Reverse ProxyCopy configuration files to their respective system directories:Bash# Systemd
-
-sudo cp configs/gitea.service /etc/systemd/system/gitea.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gitea
-
-
-
-# Nginx
-sudo cp configs/nginx.conf /etc/nginx/sites-available/gitea
-sudo ln -sf /etc/nginx/sites-available/gitea /etc/nginx/sites-enabled/
-sudo systemctl restart nginx
-
-
-
-# Fail2ban
-sudo cp configs/fail2ban/gitea-filter.conf /etc/fail2ban/filter.d/gitea.conf
-sudo cp configs/fail2ban/gitea-jail.local /etc/fail2ban/jail.d/gitea.local
-sudo systemctl restart fail2ban
-
-
-
-3. Deploy Git Quota HooksRun the automated installation script to centralize the hook scripts and link them to target repositories:Bashchmod +x scripts/install-hooks.sh
-sudo ./scripts/install-hooks.sh
-
-Quota Enforcement WorkflowPlaintextGit Push Request
-   │
-   ▼
-[Pre-Receive Hook]
-   ├── 1. Identify User (GITEA_PUSHER_ID / GITEA_PUSHER_NAME)
-   ├── 2. Calculate Size of Incoming Git Objects
-   ├── 3. Fetch Existing Usage from database:
-   │      SELECT SUM(size_bytes) FROM quota_git_object WHERE user_id = $PUSHER_ID
-   └── 4. Check Enforcement:
-          IF (Used + Reserved + Incoming) <= Quota Limit
-              ──► Create Reservation in 'quota_reservation' ──► ACCEPT PUSH
-          ELSE
-              ──► REJECT PUSH (Exit Code 1)
-   │
-   ▼
-[Post-Receive Hook]
-   ├── 1. Read Reservation Key
-   ├── 2. Write New Git Objects to 'quota_git_object'
-   └── 3. Clear Temporary Reservation from 'quota_reservation'
-Limitations & Edge CasesGit LFS: Storage quota currently applies strictly to standard Git objects (blobs, trees, commits). Git LFS objects stored via external pointers are not tracked in this implementation.History Deletions: Deleting files or branches in Git does not automatically reduce quota usage because objects remain stored in repository history until git gc is performed manually.Scope: Enforcement operates at the Git object/database layer, not as a OS filesystem disk quota.Security GuidelinesDo not commit production credentials, passwords, database passwords, or private keys to source control.Use sanitized templates (app.ini.example) for committing configuration baselines.
+| Component | Target Version / Specification | Role in Architecture |
+|---|---|---|
+| **Operating System** | Ubuntu 22.04 LTS / 24.04 LTS | Host operating system |
+| **Git Core** | v2.34.1+ | Git engine for object inspection and repository operations |
+| **Gitea** | v1.22.3 | Self-hosted Git management service |
+| **PostgreSQL** | 14+ | Stores quota configuration, Git object ledger, and reservations |
+| **Nginx** | Current supported version | Reverse proxy and TLS termination |
+| **Fail2ban** | Current supported version | Brute-force and intrusion mitigation |
+| **Target Repository 1** | `gitea-demo/web-app.git` | Git repository |
+| **Target Repository 2** | `gitea-demo/backend.git` | Git repository |
+| **Target Repository 3** | `gitea-demo/payment-service.git` | Git repository |
