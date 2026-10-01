@@ -1,35 +1,31 @@
-Gitea Server & Storage Quota POC
+# Gitea Server & Storage Quota POC
 
 A complete Gitea deployment and custom per-user cumulative Git storage quota POC using Ubuntu, PostgreSQL, Gitea, Nginx, Fail2ban, Git hooks, and PostgreSQL-based quota accounting.
 
-Overview
+---
 
-This project covers:
+## Overview
 
-Gitea installation on Ubuntu
-PostgreSQL database configuration
-Gitea binary installation
-systemd service configuration
-Gitea web installation
-Organization, users, teams, and repositories
-Nginx reverse proxy
-Fail2ban configuration
-Custom per-user cumulative Git storage quota
-Git pre-receive and post-receive quota enforcement
-PostgreSQL-based Git object accounting
-Quota validation and testing
+This repository contains the full production setup and configuration artifacts for deploying a self-hosted Gitea instance with enterprise-grade custom storage quotas.
 
+### Key Capabilities
+- **Gitea Core Setup**: systemd service integration, custom configuration (`app.ini`), and PostgreSQL database backend.
+- **Reverse Proxy & Security**: Nginx configuration for proxying Gitea, alongside Fail2ban rules to protect SSH/HTTP login attempts.
+- **Cumulative Git Storage Quota**: Custom `pre-receive` and `post-receive` hooks preventing users from exceeding allocated storage across all repositories.
+- **Automated Deployment**: Executable shell scripts for central hook deployment and symlinking across Gitea repositories.
 
-Architecture
+---
 
-                    
+## Architecture
+
+```text
                     Git Client
                         |
                         v
-                      Nginx
+                      Nginx (Port 80)
                         |
                         v
-                 Gitea Web / Git
+                 Gitea Web / Git (Port 3001)
                         |
           +-------------+-------------+
           |                           |
@@ -40,229 +36,64 @@ Architecture
      Quota Tables
           |
           v
-   Pre/Post Receive Hooks
-Environment
-Component	Value
-OS	Ubuntu
-Gitea	1.22.3
-Git	2.34.1
-Database	PostgreSQL
-Reverse Proxy	Nginx
-Security	Fail2ban
-Gitea Repositories
-
-The POC uses:
-
-gitea-demo/Web-app
-gitea-demo/Backend
-gitea-demo/Payment-service
-Quota Policy
-Team	Users	Quota per User
-Developers	user1, user2, user3	5 GiB
-Testers	user4, user5, user6	1 GiB
-DevOps	user7, user8, user9	1 GiB
-
-The quota is assigned according to team membership, but usage is tracked independently for each user.
-
-Quota is cumulative across all configured repositories.
-
-For example:
-
-user4
-├── Web-app
-├── Backend
-└── Payment-service
-       |
-       +--> All usage counts toward user4's quota
-Repository Structure
-gitea-server-quota-poc/
-│
+   Pre/Post Receive Hooks (/usr/local/lib/gitea)
+Environment & System DetailsComponentValueOSUbuntu 22.04 LTS / 24.04 LTSGitea Version1.22.3Git Version2.34.1+DatabasePostgreSQL 14+Reverse ProxyNginxSecurityFail2banTargeted Repositoriesgitea-demo/web-app.gitgitea-demo/backend.gitgitea-demo/payment-service.gitQuota PolicyQuota policy is defined by team assignment, but usage and limits are tracked individually per user across all repositories they push to.TeamUsersQuota per UserDevelopersuser1, user2, user35 GiBTestersuser4, user5, user61 GiBDevOpsuser7, user8, user91 GiBCumulative Storage ExampleIf user4 pushes code across multiple repositories:Plaintextuser4
+├── web-app.git       (300 MB)
+├── backend.git       (400 MB)
+└── payment-service.git (200 MB)
+       │
+       └── Total Cumulative Usage: 900 MB / 1 GiB Quota Limit
+Repository StructurePlaintext.
 ├── README.md
-├── .gitignore
-│
-├── docs/
-│   ├── 01-gitea-server-setup.md
-│   └── 02-storage-quota.md
-│
-├── scripts/
-│   ├── quota-pre-receive
-│   └── quota-post-receive
-│
-├── sql/
-│   ├── 01-quota-schema.sql
-│   ├── 02-quota-users.sql
-│   └── 03-quota-grants.sql
-│
-├── config/
-│   ├── systemd/
-│   │   └── gitea.service.example
-│   ├── nginx/
-│   │   └── gitea.conf.example
+├── configs/
+│   ├── app.ini.example          # Sample Gitea configuration file
+│   ├── gitea.service            # Systemd service unit definition
+│   ├── nginx.conf               # Nginx reverse proxy configuration
 │   └── fail2ban/
-│       ├── gitea.conf
-│       └── gitea.local
-│
-└── tests/
-    └── quota-validation.md
-Deployment Order
+│       ├── gitea-filter.conf    # Fail2ban filter rules for Gitea log parser
+│       └── gitea-jail.local     # Fail2ban jail configuration
+├── scripts/
+│   ├── install-hooks.sh         # Dynamic installer script for repository symlinks
+│   ├── quota-pre-receive        # Central pre-receive validation script
+│   └── quota-post-receive       # Central post-receive accounting script
+└── sql/
+    ├── 01_schema.sql            # Table definitions (quota_user, quota_git_object, quota_reservation)
+    └── 02_seed_quotas.sql       # Seed data for user quotas and permissions
+Deployment & Setup Guide1. Database SetupApply the quota database tables and seed values to your PostgreSQL database:Bashpsql -U gitea -d giteadb -f sql/01_schema.sql
+psql -U gitea -d giteadb -f sql/02_seed_quotas.sql
+2. System Service & Reverse ProxyCopy configuration files to their respective system directories:Bash# Systemd
+sudo cp configs/gitea.service /etc/systemd/system/gitea.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now gitea
 
-Follow the documentation in this order:
+# Nginx
+sudo cp configs/nginx.conf /etc/nginx/sites-available/gitea
+sudo ln -sf /etc/nginx/sites-available/gitea /etc/nginx/sites-enabled/
+sudo systemctl restart nginx
 
-1. Gitea Server Setup
-
-Open Gitea Server Setup
-
-This covers:
-
-Ubuntu Preparation
-        ↓
-PostgreSQL
-        ↓
-Gitea Binary
-        ↓
-systemd
-        ↓
-Web Installation
-        ↓
-Initial Gitea Configuration
-        ↓
-Nginx
-        ↓
-Fail2ban
-2. Storage Quota
-
-Open Storage Quota Documentation
-
-This covers:
-
-Quota Database
-      ↓
-Quota User Configuration
-      ↓
-Pre-Receive Hook
-      ↓
-Post-Receive Hook
-      ↓
-Repository Hook Installation
-      ↓
-Quota Validation
-Quota Implementation
-
-The quota implementation uses two central scripts:
-
-scripts/quota-pre-receive
-scripts/quota-post-receive
-
-These scripts are deployed on the Gitea server as:
-
-/usr/local/lib/gitea/quota-pre-receive
-/usr/local/lib/gitea/quota-post-receive
-
-Each repository contains z-quota symlinks pointing to the central scripts.
-
-PostgreSQL Tables
-
-The quota implementation uses:
-
-quota_user
-quota_git_object
-quota_reservation
-quota_user
-
-Stores the user's quota and reservation information.
-
-quota_git_object
-
-Tracks Git objects that have been charged to a user.
-
-quota_reservation
-
-Tracks quota temporarily reserved during an active push.
-
-Quota Enforcement
-
-For each push:
-
-Git Push
-   |
-   v
-Identify User
-   |
-   v
-Calculate New Git Objects
-   |
-   v
-Calculate Incoming Size
-   |
-   v
-Check:
-
-used + reserved + incoming <= quota
-   |
-   +------ Yes ------> Allow Push
-   |
-   +------ No -------> Reject Push
-Validation
-
-The quota implementation is validated using:
-
-Normal Git push
-Quota exceeded rejection
-Cumulative usage across repositories
-Different users
-Same-team user isolation
-Reservation and post-receive accounting
-
-See:
-
-Quota Validation
-
-Important Limitations
-Git LFS
-
-The current implementation accounts for normal Git objects only.
-
-Git objects → Supported
-Git LFS     → Not currently accounted
-Existing Repository Data
-
-Git objects that existed before quota deployment are treated as the initial repository baseline.
-
-Deleted Files
-
-Deleting a file does not automatically release quota because Git objects may remain in repository history.
-
-Quota Type
-
-This is a Git object storage quota, not a Linux filesystem quota.
-
-Security
-
-Do not commit:
-
-/var/lib/gitea/.pgpass
-/etc/gitea/app.ini
-Passwords
-Database credentials
-API tokens
-Private SSH keys
-TLS private keys
-
-Use the provided .example configuration files for environment-specific configuration.
-
-Result
-
-The implementation demonstrates:
-
-✓ Team-based quota assignment
-✓ Per-user quota
-✓ Different quota sizes
-✓ Cumulative usage across repositories
-✓ Same-team user isolation
-✓ Push rejection when quota is exceeded
-✓ Quota reservation
-✓ Post-receive accounting
-✓ Git object-level accounting
-Project Purpose
-
-This repository provides a reproducible reference for deploying Gitea and implementing a custom per-user cumulative Git storage quota using Git hooks and PostgreSQL.
+# Fail2ban
+sudo cp configs/fail2ban/gitea-filter.conf /etc/fail2ban/filter.d/gitea.conf
+sudo cp configs/fail2ban/gitea-jail.local /etc/fail2ban/jail.d/gitea.local
+sudo systemctl restart fail2ban
+3. Deploy Git Quota HooksRun the automated installation script to centralize the hook scripts and link them to target repositories:Bashchmod +x scripts/install-hooks.sh
+sudo ./scripts/install-hooks.sh
+Quota Enforcement WorkflowPlaintextGit Push Request
+   │
+   ▼
+[Pre-Receive Hook]
+   ├── 1. Identify User (GITEA_PUSHER_ID / GITEA_PUSHER_NAME)
+   ├── 2. Calculate Size of Incoming Git Objects
+   ├── 3. Fetch Existing Usage from database:
+   │      SELECT SUM(size_bytes) FROM quota_git_object WHERE user_id = $PUSHER_ID
+   └── 4. Check Enforcement:
+          IF (Used + Reserved + Incoming) <= Quota Limit
+              ──► Create Reservation in 'quota_reservation' ──► ACCEPT PUSH
+          ELSE
+              ──► REJECT PUSH (Exit Code 1)
+   │
+   ▼
+[Post-Receive Hook]
+   ├── 1. Read Reservation Key
+   ├── 2. Write New Git Objects to 'quota_git_object'
+   └── 3. Clear Temporary Reservation from 'quota_reservation'
+Limitations & Edge CasesGit LFS: Storage quota currently applies strictly to standard Git objects (blobs, trees, commits). Git LFS objects stored via external pointers are not tracked in this implementation.History Deletions: Deleting files or branches in Git does not automatically reduce quota usage because objects remain stored in repository history until git gc is performed manually.Scope: Enforcement operates at the Git object/database layer, not as a OS filesystem disk quota.Security GuidelinesDo not commit production credentials, passwords, database passwords, or private keys to source control.Use sanitized templates (app.ini.example) for committing configuration baselines.
