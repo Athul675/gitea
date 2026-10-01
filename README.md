@@ -37,12 +37,20 @@ This repository contains the full production setup and configuration artifacts f
           |
           v
    Pre/Post Receive Hooks (/usr/local/lib/gitea)
+
+
+
+
 Environment & System DetailsComponentValueOSUbuntu 22.04 LTS / 24.04 LTSGitea Version1.22.3Git Version2.34.1+DatabasePostgreSQL 14+Reverse ProxyNginxSecurityFail2banTargeted Repositoriesgitea-demo/web-app.gitgitea-demo/backend.gitgitea-demo/payment-service.gitQuota PolicyQuota policy is defined by team assignment, but usage and limits are tracked individually per user across all repositories they push to.TeamUsersQuota per UserDevelopersuser1, user2, user35 GiBTestersuser4, user5, user61 GiBDevOpsuser7, user8, user91 GiBCumulative Storage ExampleIf user4 pushes code across multiple repositories:Plaintextuser4
 ├── web-app.git       (300 MB)
 ├── backend.git       (400 MB)
 └── payment-service.git (200 MB)
        │
        └── Total Cumulative Usage: 900 MB / 1 GiB Quota Limit
+
+
+
+
 Repository StructurePlaintext.
 ├── README.md
 ├── configs/
@@ -59,24 +67,40 @@ Repository StructurePlaintext.
 └── sql/
     ├── 01_schema.sql            # Table definitions (quota_user, quota_git_object, quota_reservation)
     └── 02_seed_quotas.sql       # Seed data for user quotas and permissions
+
+
+
+
 Deployment & Setup Guide1. Database SetupApply the quota database tables and seed values to your PostgreSQL database:Bashpsql -U gitea -d giteadb -f sql/01_schema.sql
 psql -U gitea -d giteadb -f sql/02_seed_quotas.sql
+
+
+
 2. System Service & Reverse ProxyCopy configuration files to their respective system directories:Bash# Systemd
+
 sudo cp configs/gitea.service /etc/systemd/system/gitea.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now gitea
+
+
 
 # Nginx
 sudo cp configs/nginx.conf /etc/nginx/sites-available/gitea
 sudo ln -sf /etc/nginx/sites-available/gitea /etc/nginx/sites-enabled/
 sudo systemctl restart nginx
 
+
+
 # Fail2ban
 sudo cp configs/fail2ban/gitea-filter.conf /etc/fail2ban/filter.d/gitea.conf
 sudo cp configs/fail2ban/gitea-jail.local /etc/fail2ban/jail.d/gitea.local
 sudo systemctl restart fail2ban
+
+
+
 3. Deploy Git Quota HooksRun the automated installation script to centralize the hook scripts and link them to target repositories:Bashchmod +x scripts/install-hooks.sh
 sudo ./scripts/install-hooks.sh
+
 Quota Enforcement WorkflowPlaintextGit Push Request
    │
    ▼
