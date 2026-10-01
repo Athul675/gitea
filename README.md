@@ -1,4 +1,4 @@
-# 🚀 Gitea Server & Storage Quota POC
+# Gitea Server & Storage Quota POC
 
 [![Gitea](https://img.shields.io/badge/Gitea-1.22.3-34495E?style=for-the-badge&logo=gitea&logoColor=white)](https://gitea.io/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -47,53 +47,77 @@ The solution uses dynamic `pre-receive` and `post-receive` Git hooks to enforce 
 # 📐 Architecture & System Flow
 
 ```text
-                               +-----------------------+
-                               |      Git Client       |
-                               +-----------+-----------+
-                                           |
-                                           | HTTP / SSH
-                                           v
-                               +-----------+-----------+
-                               |   Nginx Reverse Proxy |
-                               +-----------+-----------+
-                                           |
-                                           | Port 3001
-                                           v
-                               +-----------+-----------+
-                               |     Gitea Service     |
-                               +-----------+-----------+
-                                           |
-                     +---------------------+---------------------+
-                     |                                           |
-                     v                                           v
-          +----------+-----------+                    +----------+-----------+
-          |  PostgreSQL Engine   |                    | Target Repositories |
-          +----------+-----------+                    +----------+-----------+
-                     |                                           |
-                     v                                           v
-          +----------+-----------+                    +----------+-----------+
-          |     Quota Tables     | <=== Hooks ====>  | /hooks/pre-receive.d |
-          +----------------------+                    | /hooks/post-receive.d|
-                     ^                                +----------------------+
-                     |
-                     |
-          /usr/local/lib/gitea/
-              quota-pre-receive
-              quota-post-receive
+                         +------------------+
+                         |    Git Client    |
+                         +--------+---------+
+                                  |
+                             HTTP / SSH
+                                  |
+                                  v
+                         +--------+---------+
+                         |      Nginx       |
+                         |  Reverse Proxy   |
+                         +--------+---------+
+                                  |
+                              Port 3001
+                                  |
+                                  v
+                         +--------+---------+
+                         |      Gitea       |
+                         |     v1.22.3      |
+                         +--------+---------+
+                                  |
+                 +----------------+----------------+
+                 |                                 |
+                 v                                 v
+        +--------+---------+              +--------+---------+
+        |    PostgreSQL    |              |   Repositories   |
+        +--------+---------+              +--------+---------+
+                 |                                 |
+                 v                                 v
+        +--------+---------+              +--------+---------+
+        |   Quota Tables   |<----Hooks----|    Git Hooks     |
+        +------------------+              +------------------+
+                 |
+                 v
+        +------------------+
+        | Quota Accounting |
+        | & Reservations   |
+        +------------------+
 
 
 
+## ⚙️ Environment Specifications
 
-# ⚙️ Environment Specifications
+### 🖥️ Platform
 
-| Component | Target Version / Specification | Role in Architecture |
-|---|---|---|
-| **Operating System** | Ubuntu 22.04 LTS / 24.04 LTS | Host operating system |
-| **Git Core** | v2.34.1+ | Git engine for object inspection and repository operations |
-| **Gitea** | v1.22.3 | Self-hosted Git management service |
-| **PostgreSQL** | 14+ | Stores quota configuration, Git object ledger, and reservations |
-| **Nginx** | Current supported version | Reverse proxy and TLS termination |
-| **Fail2ban** | Current supported version | Brute-force and intrusion mitigation |
-| **Target Repository 1** | `gitea-demo/web-app.git` | Git repository |
-| **Target Repository 2** | `gitea-demo/backend.git` | Git repository |
-| **Target Repository 3** | `gitea-demo/payment-service.git` | Git repository |
+```text
+Operating System : Ubuntu 22.04 LTS / 24.04 LTS
+Git Core         : v2.34.1+
+Gitea            : v1.22.3
+PostgreSQL       : 14+
+Nginx            : Current supported version
+Fail2ban         : Current supported version
+
+
+### Component Roles
+
++----------------------+-----------------------------------------------+
+| Component            | Role                                          |
++----------------------+-----------------------------------------------+
+| Operating System     | Host operating system                         |
+| Git Core             | Git object inspection and repository handling |
+| Gitea                | Self-hosted Git management service            |
+| PostgreSQL           | Quota and storage accounting database         |
+| Nginx                | Reverse proxy and TLS termination             |
+| Fail2ban             | Brute-force and intrusion mitigation          |
++----------------------+-----------------------------------------------+
+
+### 📦 Target Repositories
+
+Repository 1 : gitea-demo/web-app.git
+Repository 2 : gitea-demo/backend.git
+Repository 3 : gitea-demo/payment-service.git
+
+
+
